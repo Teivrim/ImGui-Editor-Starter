@@ -1,0 +1,78 @@
+﻿# ── eblya-2d-engine / imgui-starter ──────────────────────────────────────
+#
+# Оба редактора используют GL 3.x (шейдеры, VAO, FBO), которых нет в
+# opengl32.lib. Загрузчик — вендорённый GLAD 2, поэтому FetchContent
+# для GL не нужен, и сборка не зависит от состояния чужих репозиториев.
+#
+# Зависимости GLFW/stb/ImGui по-прежнему тянутся через FetchContent:
+# в отличие от GL, эти репозитории приходят готовыми.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: CMake + Ninja (MinGW)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Подготовить MinGW
+        shell: pwsh
+        run: |
+          $found = $null
+          foreach ($c in @("C:\mingw64\bin", "C:\msys64\mingw64\bin")) {
+            if (Test-Path (Join-Path $c "g++.exe")) { $found = $c; break }
+          }
+          if (-not $found) { "MinGW не найден"; exit 1 }
+          "MinGW: $found"
+          $env:PATH = "$found;$env:PATH"
+          Add-Content -Path $env:GITHUB_PATH -Value $found -Encoding ascii
+
+      - name: Конфигурация
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Сборка
+        run: |
+          cmake --build build 2>&1 | tail -30
+
+      - name: Бинарник на месте
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem build -Recurse -Filter EditorCore.exe | Select-Object -First 1
+          if (-not $exe) { "EditorCore.exe не создан"; exit 1 }
+          "EditorCore.exe: {0:N0} байт" -f $exe.Length
+
+      - name: Проверка, что GLEW больше не нужен
+        shell: pwsh
+        run: |
+          # Регрессия, которую стоит ловить: возврат GLEW или FetchContent
+          # для glad снова ломает конфигурацию, и это неочевидно.
+          $bad = @()
+          if (Select-String -Path CMakeLists.txt -Pattern 'GLEW' -SimpleMatch -Quiet) {
+            $bad += "CMakeLists.txt снова упоминает GLEW"
+          }
+          if (Select-String -Path CMakeLists.txt -Pattern 'Dav1dde/glad' -SimpleMatch -Quiet) {
+            $bad += "CMakeLists.txt снова тянет glad через FetchContent"
+          }
+          Get-ChildItem src -Recurse -Include *.cpp,*.h | ForEach-Object {
+            if (Select-String -Path $_.FullName -Pattern 'GL/glew.h' -SimpleMatch -Quiet) {
+              $bad += "$($_.Name) включает GL/glew.h"
+            }
+          }
+          if (-not (Test-Path third_party\glad\gl.h)) {
+            $bad += "вендорённый third_party/glad/gl.h отсутствует"
+          }
+          if ($bad.Count -gt 0) {
+            "Регрессия:"; $bad | ForEach-Object { "  $_" }
+            exit 1
+          }
+          "GLAD вендорён, GLEW не используется."
