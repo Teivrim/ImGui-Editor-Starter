@@ -1,12 +1,4 @@
-﻿# ── eblya-2d-engine / imgui-starter ──────────────────────────────────────
-#
-# Оба редактора используют GL 3.x (шейдеры, VAO, FBO), которых нет в
-# opengl32.lib. Загрузчик — вендорённый GLAD 2, поэтому FetchContent
-# для GL не нужен, и сборка не зависит от состояния чужих репозиториев.
-#
-# Зависимости GLFW/stb/ImGui по-прежнему тянутся через FetchContent:
-# в отличие от GL, эти репозитории приходят готовыми.
-name: build
+﻿name: build
 
 on:
   push:
@@ -24,55 +16,65 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Подготовить MinGW
+      - name: Prepare MinGW
         shell: pwsh
         run: |
           $found = $null
           foreach ($c in @("C:\mingw64\bin", "C:\msys64\mingw64\bin")) {
             if (Test-Path (Join-Path $c "g++.exe")) { $found = $c; break }
           }
-          if (-not $found) { "MinGW не найден"; exit 1 }
+          if (-not $found) { "MinGW not found"; exit 1 }
           "MinGW: $found"
           $env:PATH = "$found;$env:PATH"
           Add-Content -Path $env:GITHUB_PATH -Value $found -Encoding ascii
 
-      - name: Конфигурация
-        run: |
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
-      - name: Сборка
-        run: |
-          cmake --build build 2>&1 | tail -30
+      - name: Build
+        run: cmake --build build 2>&1 | tail -30
 
-      - name: Бинарник на месте
+      - name: Binary exists
         shell: pwsh
         run: |
           $exe = Get-ChildItem build -Recurse -Filter EditorCore.exe | Select-Object -First 1
-          if (-not $exe) { "EditorCore.exe не создан"; exit 1 }
-          "EditorCore.exe: {0:N0} байт" -f $exe.Length
+          if (-not $exe) { "EditorCore.exe was not produced"; exit 1 }
+          "EditorCore.exe: {0:N0} bytes" -f $exe.Length
 
-      - name: Проверка, что GLEW больше не нужен
+      # Regression guard. Two ways this project broke, both silent until a
+      # clean machine tried to build:
+      #   * GLEW came back (its glew-2.2.0 tag ships only glew.c.in);
+      #   * FetchContent came back for glad (that tag has no src/glad.c).
+      #
+      # Only CODE lines are inspected. CMakeLists.txt explains in comments
+      # why those fetches were removed, and those comments name the glad
+      # repository. A plain substring search flagged the explanation as if
+      # it were the regression.
+      - name: "Regression: dependencies stayed vendored"
         shell: pwsh
         run: |
-          # Регрессия, которую стоит ловить: возврат GLEW или FetchContent
-          # для glad снова ломает конфигурацию, и это неочевидно.
+          $code = (Get-Content CMakeLists.txt |
+                   Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+
           $bad = @()
-          if (Select-String -Path CMakeLists.txt -Pattern 'GLEW' -SimpleMatch -Quiet) {
-            $bad += "CMakeLists.txt снова упоминает GLEW"
-          }
-          if (Select-String -Path CMakeLists.txt -Pattern 'Dav1dde/glad' -SimpleMatch -Quiet) {
-            $bad += "CMakeLists.txt снова тянет glad через FetchContent"
-          }
-          Get-ChildItem src -Recurse -Include *.cpp,*.h | ForEach-Object {
+          if ($code -match 'GLEW') { $bad += "CMakeLists.txt uses GLEW again" }
+          if ($code -match 'FetchContent') { $bad += "CMakeLists.txt fetches over the network again" }
+
+          $leaky = Get-ChildItem src -Recurse -Include *.cpp,*.h | ForEach-Object {
             if (Select-String -Path $_.FullName -Pattern 'GL/glew.h' -SimpleMatch -Quiet) {
-              $bad += "$($_.Name) включает GL/glew.h"
+              $_.Name
             }
           }
-          if (-not (Test-Path third_party\glad\gl.h)) {
-            $bad += "вендорённый third_party/glad/gl.h отсутствует"
+          if ($leaky) { $bad += "sources include GL/glew.h: $($leaky -join ', ')" }
+
+          foreach ($dep in @('glad', 'glfw', 'imgui', 'stb')) {
+            if (-not (Test-Path "third_party\$dep")) {
+              $bad += "third_party/$dep is missing, offline build impossible"
+            }
           }
+
           if ($bad.Count -gt 0) {
-            "Регрессия:"; $bad | ForEach-Object { "  $_" }
+            "Regression:"; $bad | ForEach-Object { "  $_" }
             exit 1
           }
-          "GLAD вендорён, GLEW не используется."
+          "All dependencies vendored, offline build, GLEW unused."
