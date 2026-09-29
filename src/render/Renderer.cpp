@@ -20,7 +20,11 @@ static const u32 QUAD_INDICES[] = {0, 1, 2, 0, 2, 3};
 Renderer::~Renderer() = default;
 
 bool Renderer::init() {
-    gladLoadGL((void* (*)(const char*))glfwGetProcAddress);
+    // GLAD 2 ждёт GLADloadfunc — это указатель на функцию,
+// возвращающую указатель на функцию. Старый каст
+// (void* (*)(const char*)) был рассчитан на GLAD 1 и не подходит:
+// «invalid conversion ... to GLADloadfunc».
+gladLoadGL((GLADloadfunc)glfwGetProcAddress);
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
